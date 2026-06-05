@@ -413,12 +413,52 @@ class Orchestrator:
         discord_adapter.set_on_message(self.handle_discord_message)
         qq_adapter.set_on_message(self.handle_qq_message)
 
+    def _find_full_name_mentions(
+        self, text: str, target_platform: str,
+    ) -> list[tuple[int, int, str, str, str]]:
+        """在文本中查找 @完整display_name 模式（含空格），大小写不敏感。
+
+        遍历目标平台成员缓存，用完整 display_name 匹配文本中的 @提及，
+        支持带空格的名字（如 @Player One）。按名字长度降序匹配，
+        长名字优先，避免短前缀抢走匹配。
+
+        Returns:
+            list of (start, end, name, user_id, display_name)，已按 start 排序。
+        """
+        if self.matcher is None:
+            return []
+        cache = self.matcher._cache.get(target_platform, {})
+        if not cache:
+            return []
+
+        # 按 display_name 长度降序，长名字优先匹配
+        sorted_items = sorted(cache.items(), key=lambda x: len(x[1]), reverse=True)
+
+        matches: list[tuple[int, int, str, str, str]] = []
+        covered: list[tuple[int, int]] = []
+
+        for user_id, display_name in sorted_items:
+            if not display_name:
+                continue
+            pattern = "@" + re.escape(display_name)
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                start, end = m.start(), m.end()
+                # 跳过已被更长的全名覆盖的位置
+                if any(s < end and e > start for s, e in covered):
+                    continue
+                matches.append((start, end, display_name, user_id, display_name))
+                covered.append((start, end))
+
+        matches.sort(key=lambda x: x[0])
+        return matches
+
     def _resolve_text_mentions(
         self, segments: list[MessageSegment], target_platform: str,
     ) -> list[MessageSegment]:
         if self.matcher is None:
             return segments
         result: list[MessageSegment] = []
+
         for seg in segments:
             if seg.type != SEGMENT_TEXT:
                 result.append(seg)
@@ -427,28 +467,65 @@ class Orchestrator:
             if not text or "@" not in text:
                 result.append(seg)
                 continue
+
+            # ── 策略 A：全名匹配（含空格，大小写不敏感） ──
+            full_matches = self._find_full_name_mentions(text, target_platform)
+            full_ranges = [(s, e) for s, e, *_ in full_matches]
+
+            def _is_covered(start: int, end: int) -> bool:
+                return any(s < end and e > start for s, e in full_ranges)
+
+            # ── 策略 B：正则匹配 @non_whitespace（跳过已覆盖区域） ──
+            regex_hits: list[tuple[int, int, str]] = []
+            for m in MENTION_TEXT_RE.finditer(text):
+                s, e = m.start(), m.end()
+                if not _is_covered(s, e):
+                    regex_hits.append((s, e, m.group(1)))
+
+            # ── 合并，按位置排序 ──
+            entries: list[tuple[int, int, str, str | None, str | None, bool]] = []
+            for s, e, n, uid, dn in full_matches:
+                entries.append((s, e, n, uid, dn, True))
+            for s, e, n in regex_hits:
+                entries.append((s, e, n, None, None, False))
+            entries.sort(key=lambda x: x[0])
+
+            # ── 逐一解析并构建结果 ──
             last_end = 0
-            for match in MENTION_TEXT_RE.finditer(text):
-                start, end = match.start(), match.end()
+            for start, end, name, uid, dn, is_full in entries:
                 if start > last_end:
                     result.append(text_segment(text[last_end:start]))
-                name = match.group(1)
-                matched = self.matcher.match_user(name, target_platform)
-                if matched is not None:
-                    user_id, display_name = matched
+
+                if is_full:
+                    # 全名匹配直接使用缓存中的用户信息
+                    final_id, final_display = uid, dn  # type: ignore[misc]
                     if self._debug:
-                        print(f"[DEBUG] 文本 @{name} -> 匹配 {target_platform} 用户 {display_name} ({user_id})", flush=True)
-                    if target_platform == "discord":
-                        result.append(text_segment(f"<@{user_id}>"))
-                    else:
-                        result.append(at_segment("qq", user_id, display_name))
+                        print(f"[DEBUG] 文本 @{name} -> 全名匹配 {target_platform} 用户 {final_display} ({final_id})", flush=True)
                 else:
-                    if self._debug:
-                        print(f"[DEBUG] 文本 @{name} -> 未在 {target_platform} 中找到匹配", flush=True)
+                    # 正则匹配，尝试名称匹配
+                    matched = self.matcher.match_user(name, target_platform)
+                    if matched is not None:
+                        final_id, final_display = matched
+                        if self._debug:
+                            print(f"[DEBUG] 文本 @{name} -> 名称匹配 {target_platform} 用户 {final_display} ({final_id})", flush=True)
+                    else:
+                        final_id, final_display = None, None
+                        if self._debug:
+                            print(f"[DEBUG] 文本 @{name} -> 未在 {target_platform} 中找到匹配", flush=True)
+
+                if final_id is not None:
+                    if target_platform == "discord":
+                        result.append(text_segment(f"<@{final_id}>"))
+                    else:
+                        result.append(at_segment("qq", final_id, final_display))
+                else:
                     result.append(text_segment(f"@{name}"))
+
                 last_end = end
+
             if last_end < len(text):
                 result.append(text_segment(text[last_end:]))
+
         return result
 
     async def start(self) -> None:
