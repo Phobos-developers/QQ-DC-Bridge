@@ -131,7 +131,7 @@ class TestHandleQQMessage:
         channel = args[0]
         segments = args[1]
         assert channel == "dc_channel_1"
-        assert segments[0].data["text"] == "QQUser："
+        assert segments[0].data["text"] == "`QQUser`: "
         assert segments[1].data["text"] == "Hello from QQ"
 
         mock_translator.translate.assert_not_awaited()
@@ -204,7 +204,7 @@ class TestHandleQQMessage:
         mock_translator.translate.assert_awaited_once_with("Hello from QQ", target_lang="英文")
         args, _ = mock_discord_adapter.send_message.await_args
         segments = args[1]
-        assert segments[0].data["text"] == "QQUser："
+        assert segments[0].data["text"] == "`QQUser`: "
         assert segments[1].data["text"] == "Hello from QQ"
 
     @pytest.mark.asyncio
@@ -237,7 +237,7 @@ class TestHandleQQMessage:
         mock_discord_adapter.send_message.assert_awaited_once()
         args, _ = mock_discord_adapter.send_message.await_args
         segments = args[1]
-        assert segments[0].data["text"] == "QQUser："
+        assert segments[0].data["text"] == "`QQUser`: "
         assert segments[1].data["text"] == "Hello"
 
     @pytest.mark.asyncio
@@ -270,7 +270,7 @@ class TestHandleQQMessage:
         mock_translator.translate.assert_awaited_once_with("Hello from QQ", target_lang="英文")
         args, _ = mock_discord_adapter.send_message.await_args
         segments = args[1]
-        assert segments[0].data["text"] == "QQUser："
+        assert segments[0].data["text"] == "`QQUser`: "
         assert segments[1].data["text"] == "Hello from QQ"
 
     @pytest.mark.asyncio
@@ -304,7 +304,7 @@ class TestHandleQQMessage:
         mock_discord_adapter.send_message.assert_awaited_once()
         args, _ = mock_discord_adapter.send_message.await_args
         segments = args[1]
-        assert segments[0].data["text"] == "QQUser："
+        assert segments[0].data["text"] == "`QQUser`: "
         assert segments[1].data["text"] == "Hello from QQ"
 
     @pytest.mark.asyncio
