@@ -264,10 +264,10 @@ class Orchestrator:
                 segments_to_send = [text_segment(text)] + non_text_segments
             else:
                 # 翻译失败或与原文相同，走原文转发路径
-                prefix = _build_prefix("QQ", event.author_name)
+                prefix = text_segment(f"`{event.author_name}`: ")
                 segments_to_send = [prefix] + converted
         else:
-            prefix = _build_prefix("QQ", event.author_name)
+            prefix = text_segment(f"`{event.author_name}`: ")
             segments_to_send = [prefix] + converted
 
         msg_id = await self.discord_adapter.send_message(
