@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,6 +45,50 @@ class _DiscordClient(discord.Client):
     async def on_ready(self) -> None:
         logger.info("Discord client logged in as %s", self.user)
 
+    async def on_connect(self) -> None:
+        """每次（重）连接成功后触发 — 拉取断开期间漏掉的消息。"""
+        adapter = self._adapter
+        if adapter._last_processed_id is None:
+            return  # 首次启动，没有历史记录需要补
+
+        channel = self.get_channel(int(adapter._channel_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(adapter._channel_id))
+            except Exception:
+                logger.warning(
+                    "Catch-up: cannot fetch channel %s", adapter._channel_id,
+                )
+                return
+
+        logger.info(
+            "Catch-up: checking for missed messages after %s",
+            adapter._last_processed_id,
+        )
+
+        try:
+            async for msg in channel.history(
+                after=discord.Object(id=int(adapter._last_processed_id)),
+                limit=50,
+                oldest_first=True,
+            ):
+                if msg.author.bot:
+                    continue
+                # 幂等保护：跳过已在正常流程中处理过的消息
+                if str(msg.id) <= adapter._last_processed_id:
+                    continue
+                logger.info(
+                    "Catch-up: processing missed message %s from %s",
+                    msg.id,
+                    msg.author.display_name,
+                )
+                await adapter._on_discord_message(msg)
+        except Exception:
+            logger.exception("Catch-up: failed to fetch missed messages")
+
+    async def on_disconnect(self) -> None:
+        logger.warning("Discord WebSocket disconnected")
+
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
@@ -53,12 +98,22 @@ class _DiscordClient(discord.Client):
 
 
 class DiscordAdapter(PlatformAdapter):
-    def __init__(self, token: str, channel_id: str, proxy: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        channel_id: str,
+        proxy: str | None = None,
+        data_dir: str = "./data",
+    ) -> None:
         super().__init__()
         self._token = token
         self._channel_id = channel_id
         self._proxy = proxy
+        self._data_dir = data_dir
         self._client = _DiscordClient(self)
+        self._last_processed_id: str | None = None
+        self._last_processed_file = Path(data_dir) / "discord_last_msg_id.txt"
+        self._load_last_processed_id()
 
     async def start(self) -> None:
         last_exc: Exception | None = None
@@ -92,6 +147,28 @@ class DiscordAdapter(PlatformAdapter):
             "connected": self._client.is_ready(),
             "user": str(self._client.user) if self._client.user else None,
         }
+
+    def _load_last_processed_id(self) -> None:
+        """从磁盘加载最后处理的消息 ID。"""
+        try:
+            if self._last_processed_file.exists():
+                raw = self._last_processed_file.read_text(encoding="utf-8").strip()
+                if raw:
+                    self._last_processed_id = raw
+                    logger.info(
+                        "Loaded last processed Discord message ID: %s",
+                        self._last_processed_id,
+                    )
+        except Exception:
+            logger.warning("Failed to load last processed Discord message ID")
+
+    def _save_last_processed_id(self, msg_id: str) -> None:
+        """持久化最后处理的消息 ID 到磁盘。"""
+        try:
+            self._last_processed_file.parent.mkdir(parents=True, exist_ok=True)
+            self._last_processed_file.write_text(msg_id, encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to save last processed Discord message ID: %s", msg_id)
 
     async def stop(self) -> None:
         await self._client.close()
@@ -252,6 +329,11 @@ class DiscordAdapter(PlatformAdapter):
         return {str(m.id): m.display_name for m in guild.members}
 
     async def _on_discord_message(self, message: discord.Message) -> None:
+        # 幂等保护：如果消息 ID 不大于已处理的最大 ID，跳过
+        msg_id_str = str(message.id)
+        if self._last_processed_id is not None and int(msg_id_str) <= int(self._last_processed_id):
+            return
+
         segments: list[MessageSegment] = []
 
         if message.reference and message.reference.message_id:
@@ -315,6 +397,11 @@ class DiscordAdapter(PlatformAdapter):
             timestamp=message.created_at,
         )
         await self._trigger_on_message(event)
+
+        # 记录最后处理的 Discord 消息 ID（Snowflake，可直接按数值比较）
+        if self._last_processed_id is None or int(msg_id_str) > int(self._last_processed_id):
+            self._last_processed_id = msg_id_str
+            self._save_last_processed_id(msg_id_str)
 
     @staticmethod
     def _segments_to_string(segments: list[Any]) -> str:
