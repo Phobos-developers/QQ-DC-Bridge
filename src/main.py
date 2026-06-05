@@ -83,8 +83,6 @@ async def main() -> None:
         bot_qq=config.qq.bot_qq,
         group_id=qq_gid,
         onebot_ws_url=config.qq.onebot_ws_url,
-        qq_rate_limit=config.bridge.qq_rate_limit,
-        proxy=config.qq.proxy,
     )
 
     translator = Translator(config.deepseek)
