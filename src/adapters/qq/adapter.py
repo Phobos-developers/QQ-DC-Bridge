@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from typing import Any
@@ -126,6 +127,43 @@ class QQAdapter(PlatformAdapter):
             logger.debug("Resolved image URL: %s (length=%d)", url[:80], len(url))
             return str(url)
         logger.warning("get_image response has no url field: %s", result)
+        return None
+
+    async def get_image_data(self, file_uuid: str) -> bytes | None:
+        """Get image bytes from NapCat's local cache, bypassing CDN entirely.
+
+        Calls get_image API to get the local file path, then reads it directly.
+        Falls back to downloading from the API-returned URL if local file is unavailable.
+        """
+        try:
+            result = await self._ws_api_call("get_image", file=file_uuid)
+        except Exception:
+            logger.debug("get_image API call failed for: %s", file_uuid[:20])
+            return None
+        if not result or not isinstance(result, dict):
+            return None
+        data = result.get("data", {})
+        if not isinstance(data, dict):
+            return None
+
+        file_path = data.get("file", "")
+        if file_path and os.path.isfile(file_path):
+            try:
+                with open(file_path, "rb") as f:
+                    return f.read()
+            except Exception:
+                logger.debug("Failed to read local image file: %s", file_path)
+
+        url = data.get("url", "")
+        if url:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        return resp.content
+            except Exception:
+                logger.debug("Failed to download image from URL: %s", url[:80])
+
         return None
 
     async def _preprocess_image_segments(
