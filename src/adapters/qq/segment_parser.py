@@ -58,7 +58,13 @@ def _convert_cq_segment(cq_seg: Any) -> MessageSegment | None:
         return text_segment(f"[表情:{face_id}]")
 
     if seg_type == "image":
+        url_str = data.get("url", "")
         file_str = data.get("file", "")
+        if url_str:
+            seg = image_segment(url_str)
+            if file_str:
+                seg.data["file_id"] = file_str
+            return seg
         if file_str:
             return image_segment(file_str)
         return unsupported_segment("image")

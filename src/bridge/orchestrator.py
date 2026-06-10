@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import time
 import unicodedata
@@ -99,6 +100,17 @@ def _normalize_text(text: str) -> str:
     return ''.join(normalized.split())
 
 
+_MD5_HEX_RE = re.compile(r'^([0-9a-fA-F]{32})')
+
+
+def _try_gchatpic_new_url(file_uuid: str) -> str | None:
+    match = _MD5_HEX_RE.match(file_uuid.strip())
+    if match:
+        md5_upper = match.group(1).upper()
+        return f"http://gchat.qpic.cn/gchatpic_new/0/0-0-{md5_upper}/0"
+    return None
+
+
 def _extract_reply_segment(
     segments: list[MessageSegment],
 ) -> tuple[list[MessageSegment], str | None, str | None]:
@@ -187,11 +199,54 @@ class Orchestrator:
         for i, seg in enumerate(converted):
             if seg.type == SEGMENT_IMAGE:
                 file_str = seg.data.get("file", "")
+                file_id = seg.data.get("file_id", "")
+
+                # Strategy 1: Read image from NapCat local cache (bypasses broken CDN URLs)
+                if file_id and isinstance(self.qq_adapter, QQAdapter):
+                    image_data = await self.qq_adapter.get_image_data(file_id)
+                    if image_data:
+                        b64 = base64.b64encode(image_data).decode()
+                        converted[i] = MessageSegment(
+                            type=SEGMENT_IMAGE,
+                            data={"file": f"base64://{b64}"},
+                        )
+                        if self._debug:
+                            print(f"[DEBUG] 已从本地缓存读取图片: {file_id[:20]}...", flush=True)
+                        continue
+
+                # Strategy 2: URL conversion for gchat.qpic.cn/download links
+                if file_str and (
+                    file_str.startswith("http")
+                    and "gchat.qpic.cn/download" in file_str
+                ):
+                    file_id = seg.data.get("file_id", "")
+                    if file_id:
+                        gchatpic_url = _try_gchatpic_new_url(file_id)
+                        if gchatpic_url:
+                            converted[i] = MessageSegment(
+                                type=SEGMENT_IMAGE,
+                                data={"file": gchatpic_url},
+                            )
+                            if self._debug:
+                                print(f"[DEBUG] 已替换 gchatpic 直链: {file_str[:60]}... -> {gchatpic_url}", flush=True)
+                            continue
+
+                # Strategy 3: Try gchatpic or resolve_image_url for local UUIDs
                 if file_str and not (
                     file_str.startswith("http")
                     or file_str.startswith("file://")
                     or file_str.startswith("base64://")
                 ):
+                    gchatpic_url = _try_gchatpic_new_url(file_str)
+                    if gchatpic_url:
+                        converted[i] = MessageSegment(
+                            type=SEGMENT_IMAGE,
+                            data={"file": gchatpic_url},
+                        )
+                        if self._debug:
+                            print(f"[DEBUG] 已构造 gchatpic 直链: {file_str} -> {gchatpic_url}", flush=True)
+                        continue
+
                     url = None
                     if isinstance(self.qq_adapter, QQAdapter):
                         try:

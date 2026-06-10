@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import logging
 import re
@@ -166,9 +167,19 @@ class DiscordAdapter(PlatformAdapter):
         files.append(discord.File(fp, filename=f"{base_name}.{ext}"))
 
     async def _download_file(self, url: str) -> bytes | None:
+        if not url:
+            return None
+
+        if url.startswith("base64://"):
+            try:
+                return base64.b64decode(url[len("base64://"):])
+            except Exception:
+                logger.warning("Failed to decode base64 image data")
+                return None
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://multimedia.nt.qq.com.cn/",
+            "Referer": "https://gchat.qpic.cn/",
         }
         client_kwargs: dict[str, Any] = {
             "timeout": 15.0,
