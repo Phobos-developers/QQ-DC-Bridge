@@ -8,6 +8,8 @@ import time
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
+import discord
+
 from bridge.bind_manager import BindError, BindManager
 from bridge.message_store import MessageStore
 
@@ -29,6 +31,7 @@ from bridge.segment.types import (
 from bridge.verification import VerificationManager
 
 MENTION_TEXT_RE = re.compile(r"@([^\s]+)")
+MENTION_DISCORD_USER_RE = re.compile(r"<@!?(\d+)>")
 BIND_COMMAND_RE = re.compile(r"^/bind\s+")
 
 if TYPE_CHECKING:
@@ -177,6 +180,14 @@ class Orchestrator:
         author_name = self._resolve_author_display_name(
             "qq", event.author_id, event.author_name,
         )
+
+        # 已绑定用户：作者前缀用 <@discord_id> 格式
+        bound_discord_id: str | None = None
+        author_prefix: str | None = None
+        if self._bind_manager is not None:
+            bound_discord_id = self._bind_manager.get_counterpart("qq", event.author_id)
+            if bound_discord_id is not None:
+                author_prefix = f"<@{bound_discord_id}>: "
 
         if self._debug:
             preview = _debug_message_preview(event.segments)
@@ -332,7 +343,10 @@ class Orchestrator:
                     translated = None
 
             if translated is not None:
-                text = f"`{author_name}`: {translated}"
+                if author_prefix:
+                    text = f"{author_prefix}{translated}"
+                else:
+                    text = f"`{author_name}`: {translated}"
                 if original_text:
                     text += "\n-# └─ " + original_text.replace("\n", "\n-# ")
                 # 过滤掉文本段（已被翻译替代），保留非文本段（图片、贴纸等）
@@ -340,16 +354,17 @@ class Orchestrator:
                 segments_to_send = [text_segment(text)] + non_text_segments
             else:
                 # 翻译失败或与原文相同，走原文转发路径
-                prefix = text_segment(f"`{author_name}`: ")
+                prefix = text_segment(author_prefix or f"`{author_name}`: ")
                 segments_to_send = [prefix] + converted
         else:
-            prefix = text_segment(f"`{author_name}`: ")
+            prefix = text_segment(author_prefix or f"`{author_name}`: ")
             segments_to_send = [prefix] + converted
 
         msg_id = await self.discord_adapter.send_message(
             self._discord_channel_id,
             segments_to_send,
             reply_to=reply_to,
+            allowed_mentions=self._build_allowed_mentions(segments_to_send, bound_discord_id),
         )
         if msg_id is None:
             if self._debug:
@@ -827,6 +842,35 @@ class Orchestrator:
             if bound_name:
                 return bound_name
         return original_name
+
+    def _build_allowed_mentions(
+        self, segments: list[MessageSegment], exclude_user_id: str | None,
+    ) -> discord.AllowedMentions | None:
+        """从消息段中提取所有 Discord @提及的用户 ID，构建 allowed_mentions.
+
+        将 exclude_user_id 排除在通知白名单外（用于不通知绑定用户），
+        其他被 @的用户正常通知。
+        """
+        mentioned_ids: set[int] = set()
+        for seg in segments:
+            if seg.type == SEGMENT_TEXT:
+                text = seg.data.get("text", "")
+                for m in MENTION_DISCORD_USER_RE.finditer(text):
+                    mentioned_ids.add(int(m.group(1)))
+            elif seg.type == SEGMENT_AT:
+                uid = seg.data.get("user_id", "")
+                if uid.isdigit():
+                    mentioned_ids.add(int(uid))
+
+        if not mentioned_ids:
+            return None
+
+        # 从白名单中移除作者（绑定用户不通知）
+        if exclude_user_id and exclude_user_id.isdigit():
+            mentioned_ids.discard(int(exclude_user_id))
+
+        return discord.AllowedMentions(users=list(mentioned_ids))
+
     def _build_name_regex(self, target_platform: str) -> re.Pattern | None:
         """为平台构建一次性匹配所有 display_name 的正则，按名字长度降序。"""
         if self.matcher is None:
@@ -926,7 +970,6 @@ class Orchestrator:
             for start, end, name, uid, dn, is_full in entries:
                 if start > last_end:
                     result.append(text_segment(text[last_end:start]))
-                name = match.group(1)
 
                 # 优先查绑定：在 source 平台中找 @name 对应的用户，看是否有绑定
                 bound_target = self._resolve_text_mention_via_binding(name, source_platform, target_platform)
