@@ -76,9 +76,34 @@ class UserMatcher:
 
         return None
 
+    def get_display_name(self, platform: str, user_id: str) -> str | None:
+        cache = self._cache.get(platform, {})
+        return cache.get(user_id)
+
+    def has_user(self, platform: str, user_id: str) -> bool:
+        return user_id in self._cache.get(platform, {})
+
+    def search_users_by_display(self, name: str, platform: str) -> list[tuple[str, str]]:
+        """Search users by display name. Exact match first, then fall back to substring match."""
+        cache = self._cache.get(platform, {})
+        if cache is None:
+            return []
+        exact: list[tuple[str, str]] = []
+        fuzzy: list[tuple[str, str]] = []
+        for uid, display in cache.items():
+            if display == name:
+                exact.append((uid, display))
+            elif name in display or display in name:
+                fuzzy.append((uid, display))
+        if fuzzy:
+            logger.warning(
+                "Fuzzy match used for '%s' on %s: exact=%d fuzzy=%d",
+                name, platform, len(exact), len(fuzzy),
+            )
+        return exact + fuzzy
+
     def _resolve_qq_display_name(self, user_id: str) -> str | None:
-        qq_cache = self._cache.get("qq", {})
-        return qq_cache.get(user_id)
+        return self.get_display_name("qq", user_id)
 
     def resolve_mention(
         self,

@@ -29,6 +29,7 @@ from bridge.segment.types import (
 from bridge.verification import VerificationManager
 
 MENTION_TEXT_RE = re.compile(r"@([^\s]+)")
+BIND_COMMAND_RE = re.compile(r"^/bind\s+")
 
 if TYPE_CHECKING:
     from adapters.base import MessageEvent, PlatformAdapter
@@ -150,6 +151,7 @@ class Orchestrator:
         self._start_time = time.monotonic()
 
         self._pending: dict[str, PendingTranslation] = {}
+        self._bind_lock = asyncio.Lock()
 
         self.discord_adapter: PlatformAdapter | None = None
         self.qq_adapter: PlatformAdapter | None = None
@@ -515,7 +517,7 @@ class Orchestrator:
             event.platform, event.author_id, text[:80],
         )
 
-        if text.startswith("/bind "):
+        if text.startswith("/bind"):
             await self._handle_bind_command(event, text)
         elif text.startswith("/unbind"):
             await self._handle_unbind_command(event)
@@ -536,7 +538,7 @@ class Orchestrator:
         """处理 /bind 命令."""
         p = event.platform
         # 解析目标平台和标识符
-        target_platform, target_identifier = self._parse_bind_target(text)
+        target_platform, target_identifier = self._parse_bind_target(text, from_platform=p)
         if target_platform is None or not target_identifier:
             logger.warning(
                 "Invalid bind format from %s:%s: %s",
@@ -574,41 +576,42 @@ class Orchestrator:
             )
             return
 
-        # 检查是否已绑定
-        if self._bind_manager.is_bound(p, event.author_id):
-            logger.warning(
-                "Bind rejected: source already bound %s:%s",
-                p, event.author_id,
-            )
-            await self._send_private_reply(
-                p, event.author_id,
-                self._l10n(p,
-                    "你的账号已绑定，请先使用 /unbind 解绑。",
-                    "Your account is already bound. Use /unbind first.",
-                ),
-            )
-            return
-        if self._bind_manager.is_bound(target_platform, target_user_id):
-            logger.warning(
-                "Bind rejected: target already bound %s:%s",
-                target_platform, target_user_id,
-            )
-            await self._send_private_reply(
-                p, event.author_id,
-                self._l10n(p,
-                    f"该 {target_platform.upper()} 账号已绑定到其他用户，请先解绑。",
-                    f"This {target_platform.upper()} account is already bound to another user.",
-                ),
-            )
-            return
+        async with self._bind_lock:
+            # 检查是否已绑定（在锁内，防止并发绑定导致状态不一致）
+            if self._bind_manager.is_bound(p, event.author_id):
+                logger.warning(
+                    "Bind rejected: source already bound %s:%s",
+                    p, event.author_id,
+                )
+                await self._send_private_reply(
+                    p, event.author_id,
+                    self._l10n(p,
+                        "你的账号已绑定，请先使用 /unbind 解绑。",
+                        "Your account is already bound. Use /unbind first.",
+                    ),
+                )
+                return
+            if self._bind_manager.is_bound(target_platform, target_user_id):
+                logger.warning(
+                    "Bind rejected: target already bound %s:%s",
+                    target_platform, target_user_id,
+                )
+                await self._send_private_reply(
+                    p, event.author_id,
+                    self._l10n(p,
+                        f"该 {target_platform.upper()} 账号已绑定到其他用户，请先解绑。",
+                        f"This {target_platform.upper()} account is already bound to another user.",
+                    ),
+                )
+                return
 
-        # 生成验证码并发送到目标平台
-        code = self._verification_manager.create(
-            source_platform=p,
-            source_user_id=event.author_id,
-            target_platform=target_platform,
-            target_user_id=target_user_id,
-        )
+            # 生成验证码并发送到目标平台
+            code = self._verification_manager.create(
+                source_platform=p,
+                source_user_id=event.author_id,
+                target_platform=target_platform,
+                target_user_id=target_user_id,
+            )
 
         sent = await self._send_verification_code(target_platform, target_user_id, code)
         if sent:
@@ -669,69 +672,75 @@ class Orchestrator:
     async def _handle_verification_reply(self, event: MessageEvent, code: str) -> None:
         """处理验证码回复."""
         p = event.platform
-        result = self._verification_manager.verify(
-            source_platform=p,
-            source_user_id=event.author_id,
-            code=code,
-        )
-        if result is None:
-            logger.warning(
-                "Verification failed for %s:%s (wrong/expired code)",
+        async with self._bind_lock:
+            result = self._verification_manager.verify(
+                source_platform=p,
+                source_user_id=event.author_id,
+                code=code,
+            )
+            if result is None:
+                logger.warning(
+                    "Verification failed for %s:%s (wrong/expired code)",
+                    p, event.author_id,
+                )
+                await self._send_private_reply(
+                    p, event.author_id,
+                    self._l10n(p,
+                        "验证码错误或已过期，请重新发送 /bind 命令。",
+                        "Invalid or expired code. Please send /bind again.",
+                    ),
+                )
+                return
+
+            target_platform, target_user_id = result
+
+            try:
+                self._bind_manager.bind(
+                    qq_id=event.author_id if p == "qq" else target_user_id,
+                    discord_id=event.author_id if p == "discord" else target_user_id,
+                )
+            except BindError as e:
+                logger.error(
+                    "Bind failed during verification: %s:%s ↔ %s:%s - %s",
+                    p, event.author_id,
+                    target_platform, target_user_id, e,
+                )
+                await self._send_private_reply(
+                    p, event.author_id,
+                    self._l10n(p,
+                        f"绑定失败：{e}",
+                        f"Bind failed: {e}",
+                    ),
+                )
+                return
+
+            logger.info(
+                "Bind successful: %s:%s ↔ %s:%s",
                 p, event.author_id,
+                target_platform, target_user_id,
             )
             await self._send_private_reply(
                 p, event.author_id,
                 self._l10n(p,
-                    "验证码错误或已过期，请重新发送 /bind 命令。",
-                    "Invalid or expired code. Please send /bind again.",
+                    "绑定成功 🎉 现在跨平台转发时会自动 @ 对方并使用绑定后的名称。",
+                    "Binding successful 🎉 Messages will now auto-@ the bound user and show the bound name.",
                 ),
             )
-            return
 
-        target_platform, target_user_id = result
-
-        # 双重检查绑定冲突（验证期间可能已被其他操作绑定）
-        try:
-            self._bind_manager.bind(
-                qq_id=event.author_id if p == "qq" else target_user_id,
-                discord_id=event.author_id if p == "discord" else target_user_id,
-            )
-        except BindError as e:
-            logger.error(
-                "Bind failed during verification: %s:%s ↔ %s:%s - %s",
-                p, event.author_id,
-                target_platform, target_user_id, e,
-            )
-            await self._send_private_reply(
-                p, event.author_id,
-                self._l10n(p,
-                    f"绑定失败：{e}",
-                    f"Bind failed: {e}",
-                ),
-            )
-            return
-
-        logger.info(
-            "Bind successful: %s:%s ↔ %s:%s",
-            p, event.author_id,
-            target_platform, target_user_id,
-        )
-        await self._send_private_reply(
-            p, event.author_id,
-            self._l10n(p,
-                "绑定成功 🎉 现在跨平台转发时会自动 @ 对方并使用绑定后的名称。",
-                "Binding successful 🎉 Messages will now auto-@ the bound user and show the bound name.",
-            ),
-        )
-
-    def _parse_bind_target(self, text: str) -> tuple[str | None, str]:
+    def _parse_bind_target(self, text: str, from_platform: str = "discord") -> tuple[str | None, str]:
         """解析 /bind 命令的目标平台和标识符.
+
+        Args:
+            text: 命令文本
+            from_platform: 发起绑定的平台 ("qq" 或 "discord")
 
         Returns:
             (platform, identifier) or (None, "") 如果格式无效.
         """
-        # 移除 "/bind " 前缀
-        rest = text[6:].strip()
+        m = BIND_COMMAND_RE.match(text)
+        if not m:
+            return None, ""
+        rest = text[m.end():].strip()
         if not rest:
             return None, ""
 
@@ -744,11 +753,11 @@ class Orchestrator:
                 return platform_part, identifier
             return None, ""
 
-        # 也支持纯 QQ 号（从 Discord 发起）
-        if rest.isdigit():
+        # 从 Discord 发起时，纯数字视为 QQ 号
+        if rest.isdigit() and from_platform == "discord":
             return "qq", rest
 
-        # 否则当作 Discord 用户名
+        # 从 QQ 发起时或非数字，当作 Discord 用户名
         return "discord", rest
 
     def _resolve_target_user(self, platform: str, identifier: str) -> str | None:
@@ -765,8 +774,7 @@ class Orchestrator:
             user_id, _ = result
             return user_id
         # 按显示名称未找到时，尝试按用户 ID 直接查找（应对 QQ 号等纯数字标识符）
-        cache = self.matcher._cache.get(platform)
-        if cache and identifier in cache:
+        if self.matcher.has_user(platform, identifier):
             return identifier
         return None
 
@@ -816,10 +824,8 @@ class Orchestrator:
             return original_name
         # 从缓存中查找绑定后的显示名
         if self.matcher is not None:
-            cache = self.matcher._cache.get(
-                "discord" if platform == "qq" else "qq", {},
-            )
-            bound_name = cache.get(counterpart_id)
+            target_platform = "discord" if platform == "qq" else "qq"
+            bound_name = self.matcher.get_display_name(target_platform, counterpart_id)
             if bound_name:
                 return bound_name
         return original_name
@@ -886,14 +892,12 @@ class Orchestrator:
         """
         if self.matcher is None or self._bind_manager is None:
             return None
-        source_cache = self.matcher._cache.get(source_platform, {})
-        for source_user_id, source_display in source_cache.items():
-            if name == source_display or name in source_display or source_display in name:
-                bound_id = self._bind_manager.get_counterpart(source_platform, source_user_id)
-                if bound_id is not None:
-                    target_cache = self.matcher._cache.get(target_platform, {})
-                    target_display = target_cache.get(bound_id, bound_id)
-                    return bound_id, target_display
+        candidates = self.matcher.search_users_by_display(name, source_platform)
+        for source_user_id, _ in candidates:
+            bound_id = self._bind_manager.get_counterpart(source_platform, source_user_id)
+            if bound_id is not None:
+                target_display = self.matcher.get_display_name(target_platform, bound_id) or bound_id
+                return bound_id, target_display
         return None
 
     async def start(self) -> None:

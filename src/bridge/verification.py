@@ -8,6 +8,8 @@ from typing import Self
 
 logger = logging.getLogger(__name__)
 
+_MAX_VERIFICATION_ATTEMPTS = 5
+
 
 @dataclass
 class VerificationCode:
@@ -19,6 +21,7 @@ class VerificationCode:
     target_platform: str
     target_user_id: str
     expires_at: float
+    attempts: int = 0
 
     @property
     def is_expired(self) -> bool:
@@ -114,9 +117,16 @@ class VerificationManager:
             )
             return None
         if vc.code != code:
+            vc.attempts += 1
+            if vc.attempts >= _MAX_VERIFICATION_ATTEMPTS:
+                logger.warning(
+                    "Verification failed: too many attempts for %s:%s (%d/%d), removing code",
+                    source_platform, source_user_id, vc.attempts, _MAX_VERIFICATION_ATTEMPTS,
+                )
+                return None
             logger.warning(
-                "Verification failed: wrong code for %s:%s (expected=%s, got=%s)",
-                source_platform, source_user_id, vc.code, code,
+                "Verification failed: wrong code for %s:%s (expected=%s, got=%s, attempt=%d/%d)",
+                source_platform, source_user_id, vc.code, code, vc.attempts, _MAX_VERIFICATION_ATTEMPTS,
             )
             # 验证码错误，放回 pending（允许重试）
             self._pending[key] = vc
