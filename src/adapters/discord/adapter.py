@@ -5,6 +5,7 @@ import base64
 import io
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 COMBINED_MARKUP_RE = re.compile(r"(<a?:(\w+):(\d+)>|<@!?(\d+)>)")
 
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+MAX_CATCHUP_AGE = 1800  # 30 分钟，补发时跳过更早的消息
 
 
 class _DiscordClient(discord.Client):
@@ -67,25 +69,35 @@ class _DiscordClient(discord.Client):
             adapter._last_processed_id,
         )
 
-        try:
-            async for msg in channel.history(
-                after=discord.Object(id=int(adapter._last_processed_id)),
-                limit=50,
-                oldest_first=True,
-            ):
-                if msg.author.bot:
-                    continue
-                # 幂等保护：跳过已在正常流程中处理过的消息
-                if str(msg.id) <= adapter._last_processed_id:
-                    continue
-                logger.info(
-                    "Catch-up: processing missed message %s from %s",
-                    msg.id,
-                    msg.author.display_name,
-                )
-                await adapter._on_discord_message(msg)
-        except Exception:
-            logger.exception("Catch-up: failed to fetch missed messages")
+        async with adapter._catch_up_lock:
+            now = datetime.now(timezone.utc)
+            try:
+                async for msg in channel.history(
+                    after=discord.Object(id=int(adapter._last_processed_id)),
+                    limit=50,
+                    oldest_first=True,
+                ):
+                    if msg.author.bot:
+                        continue
+                    # 时间窗口检查：跳过超过 MAX_CATCHUP_AGE 的旧消息
+                    if msg.created_at and (now - msg.created_at).total_seconds() > MAX_CATCHUP_AGE:
+                        logger.info(
+                            "Catch-up: skipping old message %s from %s (%.0fs old)",
+                            msg.id, msg.author.display_name,
+                            (now - msg.created_at).total_seconds(),
+                        )
+                        continue
+                    # 幂等保护：跳过已在正常流程中处理过的消息
+                    if str(msg.id) <= adapter._last_processed_id:
+                        continue
+                    logger.info(
+                        "Catch-up: processing missed message %s from %s",
+                        msg.id,
+                        msg.author.display_name,
+                    )
+                    await adapter._on_discord_message(msg)
+            except Exception:
+                logger.exception("Catch-up: failed to fetch missed messages")
 
     async def on_disconnect(self) -> None:
         logger.warning("Discord WebSocket disconnected")
@@ -95,7 +107,9 @@ class _DiscordClient(discord.Client):
             return
         if str(message.channel.id) != self._adapter._channel_id:
             return
-        await self._adapter._on_discord_message(message)
+        # 补发期间阻塞常规转发，防止消息错乱
+        async with self._adapter._catch_up_lock:
+            await self._adapter._on_discord_message(message)
 
 
 class DiscordAdapter(PlatformAdapter):
@@ -114,6 +128,7 @@ class DiscordAdapter(PlatformAdapter):
         self._client = _DiscordClient(self)
         self._last_processed_id: str | None = None
         self._last_processed_file = Path(data_dir) / "discord_last_msg_id.txt"
+        self._catch_up_lock = asyncio.Lock()
         self._load_last_processed_id()
 
     async def start(self) -> None:
