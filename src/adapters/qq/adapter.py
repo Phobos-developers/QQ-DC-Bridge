@@ -390,15 +390,15 @@ class QQAdapter(PlatformAdapter):
                 return False
             data = result.get("data") if isinstance(result, dict) else None
             status = result.get("status")
-            success = data is not None or status == "ok"
-            if success:
-                logger.info("Private message sent to QQ user %s", user_id)
+            has_message_id = isinstance(data, dict) and "message_id" in data
+            if has_message_id:
+                logger.info("Private message sent to QQ user %s (message_id=%s)", user_id, data["message_id"])
             else:
                 logger.warning(
                     "send_private_msg failed for user %s: status=%s data=%s",
                     user_id, status, data,
                 )
-            return bool(success)
+            return has_message_id
         except Exception:
             logger.exception("Failed to send private message to QQ user %s", user_id)
             return False
