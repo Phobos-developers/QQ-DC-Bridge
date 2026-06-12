@@ -468,14 +468,26 @@ class Orchestrator:
         discord_adapter.set_on_message(self.handle_discord_message)
         qq_adapter.set_on_message(self.handle_qq_message)
 
+    def _build_name_regex(self, target_platform: str) -> re.Pattern | None:
+        """为平台构建一次性匹配所有 display_name 的正则，按名字长度降序。"""
+        if self.matcher is None:
+            return None
+        cache = self.matcher._cache.get(target_platform, {})
+        if not cache:
+            return None
+        names = sorted((n for n in cache.values() if n), key=len, reverse=True)
+        if not names:
+            return None
+        pattern = "@(" + "|".join(re.escape(n) for n in names) + ")"
+        return re.compile(pattern, re.IGNORECASE)
+
     def _find_full_name_mentions(
         self, text: str, target_platform: str,
     ) -> list[tuple[int, int, str, str, str]]:
         """在文本中查找 @完整display_name 模式（含空格），大小写不敏感。
 
-        遍历目标平台成员缓存，用完整 display_name 匹配文本中的 @提及，
-        支持带空格的名字（如 @Player One）。按名字长度降序匹配，
-        长名字优先，避免短前缀抢走匹配。
+        用单个组合正则一次性匹配所有 display_name（按长度降序），
+        避免对每个成员单独做 regex 扫描导致的 O(n) 性能问题。
 
         Returns:
             list of (start, end, name, user_id, display_name)，已按 start 排序。
@@ -486,23 +498,27 @@ class Orchestrator:
         if not cache:
             return []
 
-        # 按 display_name 长度降序，长名字优先匹配
-        sorted_items = sorted(cache.items(), key=lambda x: len(x[1]), reverse=True)
+        regex = self._build_name_regex(target_platform)
+        if regex is None:
+            return []
+
+        name_lookup: dict[str, tuple[str, str]] = {}
+        for uid, name in cache.items():
+            if name:
+                key = name.casefold()
+                if key not in name_lookup:
+                    name_lookup[key] = (uid, name)
 
         matches: list[tuple[int, int, str, str, str]] = []
-        covered: list[tuple[int, int]] = []
 
-        for user_id, display_name in sorted_items:
-            if not display_name:
+        for m in regex.finditer(text):
+            matched_name = m.group(1)
+            entry = name_lookup.get(matched_name.casefold())
+            if entry is None:
                 continue
-            pattern = "@" + re.escape(display_name)
-            for m in re.finditer(pattern, text, re.IGNORECASE):
-                start, end = m.start(), m.end()
-                # 跳过已被更长的全名覆盖的位置
-                if any(s < end and e > start for s, e in covered):
-                    continue
-                matches.append((start, end, display_name, user_id, display_name))
-                covered.append((start, end))
+            user_id, display_name = entry
+            start, end = m.start(), m.end()
+            matches.append((start, end, display_name, user_id, display_name))
 
         matches.sort(key=lambda x: x[0])
         return matches
