@@ -548,11 +548,11 @@ class Orchestrator:
                 p, event.author_id,
                 self._l10n(p,
                     "格式错误。请使用：\n"
-                    "  /bind <QQ号>   (从 Discord 私信)\n"
-                    "  /bind <用户名>  (从 QQ 私信)",
+                    "  /bind <QQ号>   (从 Discord 私信)",
+                    # "  /bind <用户名>  (从 QQ 私信)",  # ── 已禁用 ──
                     "Invalid format. Use:\n"
-                    "  /bind <QQ number>   (from Discord DM)\n"
-                    "  /bind <username>  (from QQ)",
+                    "  /bind <QQ number>   (from Discord DM)",
+                    # "  /bind <username>  (from QQ)",  # ── 已禁用 ──
                 ),
             )
             return
@@ -758,7 +758,11 @@ class Orchestrator:
             return "qq", rest
 
         # 从 QQ 发起时或非数字，当作 Discord 用户名
-        return "discord", rest
+        # ── 已禁用：QQ→Discord 昵称绑定功能（PR review 要求移除） ──
+        # if from_platform == "qq":
+        #     return "discord", rest
+        # return "discord", rest
+        return None, ""
 
     def _resolve_target_user(self, platform: str, identifier: str) -> str | None:
         """在目标平台成员缓存中查找用户.

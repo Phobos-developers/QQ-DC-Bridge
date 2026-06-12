@@ -753,15 +753,9 @@ class TestHandleBindCommand:
         mock_message_store: MagicMock,
     ) -> None:
         mock_qq_adapter.send_private_msg = AsyncMock(return_value=True)
-        mock_discord_adapter.send_dm = AsyncMock(return_value=True)
-        matcher = MagicMock(spec=UserMatcher)
-        matcher.match_user = MagicMock(return_value=("discord_user_1", "DiscordUser"))
-        matcher.has_user = MagicMock(return_value=False)
 
         orch = Orchestrator(bridge_config, mock_message_store)
         orch.qq_adapter = mock_qq_adapter
-        orch.discord_adapter = mock_discord_adapter
-        orch.matcher = matcher
 
         event = MessageEvent(
             message_id="pv_1",
@@ -774,9 +768,9 @@ class TestHandleBindCommand:
         )
         await orch.handle_private_message(event)
 
-        assert mock_qq_adapter.send_private_msg.await_count >= 1
+        mock_qq_adapter.send_private_msg.assert_called_once()
         call_text = mock_qq_adapter.send_private_msg.call_args.args[1]
-        assert "验证码" in call_text or "code" in call_text.lower()
+        assert "格式错误" in call_text
 
     @pytest.mark.asyncio
     async def test_bind_from_discord_with_qq_number(
@@ -820,14 +814,8 @@ class TestHandleBindCommand:
         mock_message_store: MagicMock,
     ) -> None:
         mock_qq_adapter.send_private_msg = AsyncMock(return_value=True)
-        matcher = MagicMock(spec=UserMatcher)
-        matcher.match_user = MagicMock(return_value=("discord_user_1", "DiscordUser"))
-        matcher.has_user = MagicMock(return_value=False)
-
         orch = Orchestrator(bridge_config, mock_message_store)
         orch.qq_adapter = mock_qq_adapter
-        orch.matcher = matcher
-        orch._bind_manager.bind(qq_id="10001", discord_id="existing_user")
 
         event = MessageEvent(
             message_id="pv_3",
@@ -842,7 +830,7 @@ class TestHandleBindCommand:
 
         mock_qq_adapter.send_private_msg.assert_called_once()
         call_text = mock_qq_adapter.send_private_msg.call_args.args[1]
-        assert "已绑定" in call_text
+        assert "格式错误" in call_text
 
     @pytest.mark.asyncio
     async def test_bind_target_not_found(
@@ -852,13 +840,8 @@ class TestHandleBindCommand:
         mock_message_store: MagicMock,
     ) -> None:
         mock_qq_adapter.send_private_msg = AsyncMock(return_value=True)
-        matcher = MagicMock(spec=UserMatcher)
-        matcher.match_user = MagicMock(return_value=None)
-        matcher.has_user = MagicMock(return_value=False)
-
         orch = Orchestrator(bridge_config, mock_message_store)
         orch.qq_adapter = mock_qq_adapter
-        orch.matcher = matcher
 
         event = MessageEvent(
             message_id="pv_4",
@@ -873,7 +856,7 @@ class TestHandleBindCommand:
 
         mock_qq_adapter.send_private_msg.assert_called_once()
         call_text = mock_qq_adapter.send_private_msg.call_args.args[1]
-        assert "未找到" in call_text
+        assert "格式错误" in call_text
 
     @pytest.mark.asyncio
     async def test_bind_invalid_format(
@@ -1116,8 +1099,8 @@ class TestParseBindTarget:
     def test_bind_regex_handles_multiple_spaces(self) -> None:
         orch = Orchestrator.__new__(Orchestrator)
         platform, ident = orch._parse_bind_target("/bind   DiscordUser", from_platform="qq")
-        assert platform == "discord"
-        assert ident == "DiscordUser"
+        assert platform is None
+        assert ident == ""
 
     def test_bind_with_qq_prefix(self) -> None:
         orch = Orchestrator.__new__(Orchestrator)
@@ -1149,8 +1132,8 @@ class TestParseBindTarget:
         assert platform == "qq"
         assert ident == "10001"
 
-    def test_bind_digits_from_qq_is_discord(self) -> None:
+    def test_bind_digits_from_qq_rejected(self) -> None:
         orch = Orchestrator.__new__(Orchestrator)
         platform, ident = orch._parse_bind_target("/bind 12345", from_platform="qq")
-        assert platform == "discord"
-        assert ident == "12345"
+        assert platform is None
+        assert ident == ""
